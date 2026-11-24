@@ -1,8 +1,8 @@
 {
   "version": 3,
   "approver": "Dhanesh",
-  "criteria_commit": "7bb90d9c5ddf62af74f1c1b70f8e294b91f7bfab",
-  "obligations_digest": "d7a5b425ee01d37dc75eb95fd5bf56437b78f7416b450640f12e37a3356499f0",
+  "criteria_commit": "c477b93542f0f74fd304399010f1c8ca48b4ca33",
+  "obligations_digest": "a2dff9ca6c621570159bd8e3143f6d78f8e922f332f5fd5c6bb7542437240637",
   "entries": [
     {
       "obligation": "SPEC-7.1-O1",
@@ -416,9 +416,59 @@
       "name": "modal_intent_and_conditional_relations_are_hedged",
       "lang": "rust",
       "hash": "605d614180c19f10a25c0bf597b8053695a397b23be3e4f42597f491936c42cc"
+    },
+    {
+      "obligation": "SPEC-7.1-O7",
+      "path": "tests/coref_test.rs",
+      "name": "a_pronoun_takes_its_one_antecedent",
+      "lang": "rust",
+      "hash": "d7169aee8b7bf7c0ced7ba3332385c9d5357761aae83e7bd5126861e0ba9ce33"
+    },
+    {
+      "obligation": "SPEC-7.1-O7",
+      "path": "tests/coref_test.rs",
+      "name": "an_ambiguous_or_unanchored_pronoun_yields_no_fact",
+      "lang": "rust",
+      "hash": "1f805d4a951dcbb65e6dadc089689a3d7b6480543c111b92a6fb721f0e58bfcf"
+    },
+    {
+      "obligation": "SPEC-7.1-O7",
+      "path": "tests/coref_test.rs",
+      "name": "first_person_is_still_the_speaker",
+      "lang": "rust",
+      "hash": "eac44846504f37833c91b2d3f37d999c85f7d326ff2e8734e310cf9bccaabcd5"
+    },
+    {
+      "obligation": "SPEC-7.1-O7",
+      "path": "tests/coref_test.rs",
+      "name": "resolved_pronouns_link_through_the_linker_and_keep_negation",
+      "lang": "rust",
+      "hash": "c57a2a708d87b1590ec3c51287657380ef2038fb1ead3c6295b69c473c7ca33b"
+    },
+    {
+      "obligation": "SPEC-7.1-O7",
+      "path": "tests/coref_test.rs",
+      "name": "short_names_join_their_full_name",
+      "lang": "rust",
+      "hash": "1dbb80843dba4574b2bab2709463c188663aaeb8c0ae982372013387c29ea395"
     }
   ],
   "helpers": [
+    {
+      "path": "tests/coref_test.rs",
+      "item": "fn ep",
+      "hash": "2677bf9b77c17031d977ed799d76029873f6ec6ca9ec3afe9a42b4faec7a678d"
+    },
+    {
+      "path": "tests/coref_test.rs",
+      "item": "fn reasons",
+      "hash": "f1a7b7fc81a83b7c8794ec0070aa86dc299f98040a76f040012766bc637757f3"
+    },
+    {
+      "path": "tests/coref_test.rs",
+      "item": "fn triples",
+      "hash": "639f244ba3db5c8f48e386ea0e3a241070c0eaf3c3663eadb0138bc62ee07152"
+    },
     {
       "path": "tests/default_extraction_test.rs",
       "item": "fn ep",
