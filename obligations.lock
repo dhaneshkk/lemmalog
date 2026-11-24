@@ -1,8 +1,8 @@
 {
   "version": 3,
   "approver": "Dhanesh",
-  "criteria_commit": "c477b93542f0f74fd304399010f1c8ca48b4ca33",
-  "obligations_digest": "a2dff9ca6c621570159bd8e3143f6d78f8e922f332f5fd5c6bb7542437240637",
+  "criteria_commit": "f9ab226b227c98a11dc423592e4938838623edf1",
+  "obligations_digest": "a6d7bfc0822ecb3adb56d7faa67949449faaa83b82718677ab2c57e77628994a",
   "entries": [
     {
       "obligation": "SPEC-7.1-O1",
@@ -451,9 +451,74 @@
       "name": "short_names_join_their_full_name",
       "lang": "rust",
       "hash": "1dbb80843dba4574b2bab2709463c188663aaeb8c0ae982372013387c29ea395"
+    },
+    {
+      "obligation": "SPEC-7.1-O8",
+      "path": "tests/coref_memory_test.rs",
+      "name": "a_coref_link_is_a_fact_and_identity_is_derived",
+      "lang": "rust",
+      "hash": "1501eb54b5627544273e4877f4f37df45ff3e243da86c9e0596bb21634dc68f0"
+    },
+    {
+      "obligation": "SPEC-7.1-O8",
+      "path": "tests/coref_memory_test.rs",
+      "name": "a_plain_fact_supersedes_through_a_link_too",
+      "lang": "rust",
+      "hash": "06d1452b4ab3c2d1c6b0652bb7cdf974ddddaa2e9e0c0649c39aa7b38683c935"
+    },
+    {
+      "obligation": "SPEC-7.1-O8",
+      "path": "tests/coref_memory_test.rs",
+      "name": "retracting_a_link_withdraws_what_it_derived_and_reopens_what_it_closed",
+      "lang": "rust",
+      "hash": "f887b6be9a82a3e9300270ad7f03f7ea69961224c2f2f2af9648ed2777c950f7"
+    },
+    {
+      "obligation": "SPEC-7.1-O9",
+      "path": "tests/coref_memory_test.rs",
+      "name": "a_closed_gate_leaves_the_pronoun_unresolved",
+      "lang": "rust",
+      "hash": "7fae6e35aef729633450c3d02665139a0ad1ffbba4b75b3a109e245ac7ceb768"
+    },
+    {
+      "obligation": "SPEC-7.1-O9",
+      "path": "tests/coref_memory_test.rs",
+      "name": "tier_two_resolves_only_abstentions_through_the_gate_and_its_score_is_the_confidence",
+      "lang": "rust",
+      "hash": "da49666ace49e55824ae301f582b248dbfe9b9d9ddd894069bd032648c1f6295"
     }
   ],
   "helpers": [
+    {
+      "path": "tests/coref_memory_test.rs",
+      "item": "fn coref_rows",
+      "hash": "f7ae26354c9a85709724df2361e85a971c8670cb0185f108406752544ce7df72"
+    },
+    {
+      "path": "tests/coref_memory_test.rs",
+      "item": "fn current",
+      "hash": "4217750988293d3f136ed50fb4d206e42434f688363579b352a0a17aa0c68f4a"
+    },
+    {
+      "path": "tests/coref_memory_test.rs",
+      "item": "fn memory",
+      "hash": "481ff26857d8cc2d266bd112dfe9e2cdc9e952e3889393e5a55e03ecd45e4bb8"
+    },
+    {
+      "path": "tests/coref_memory_test.rs",
+      "item": "impl PairScorer for Table",
+      "hash": "9f1003184a497980a743c4bd679bb70f1ecade781e25282580927b17ba404145"
+    },
+    {
+      "path": "tests/coref_memory_test.rs",
+      "item": "struct Table",
+      "hash": "29b099644e884d0c2b2eabab8af0d942dc5ae9d3afa7d4d70eaace104d633828"
+    },
+    {
+      "path": "tests/coref_memory_test.rs",
+      "item": "type Memory",
+      "hash": "48d3a8920011f89206e7befe0dcf252351a7537c8084dc616b1a0a192755f2a8"
+    },
     {
       "path": "tests/coref_test.rs",
       "item": "fn ep",
