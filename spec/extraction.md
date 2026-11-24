@@ -187,11 +187,37 @@ obligations:
     scope:
       - src/extract/negex.rs::hedged_with
       - src/extract/pipeline.rs::run
+  - id: SPEC-7.1-O7
+    says: >
+      Third-person pronouns and short names are resolved within an episode
+      by ordered Datalog sieves (extract::coref::SIEVE_RULES, run on the
+      engine, so each link has a why proof): exact name match, acronym,
+      head word (the first or last word of an earlier longer name with the
+      same label, never a generic word such as "Corp"), then pronouns ("he",
+      "she" take a person; "it" an organisation, team, place or thing;
+      "they" a person, organisation or team) from the nearest sentence, up
+      to two back, that has a compatible earlier mention. An antecedent
+      always precedes its mention, and a mention resolves only when its
+      sieve's candidates are one entity (a name and the names resolved to
+      it count as one). A resolved mention is linked as its antecedent, in
+      the antecedent's sentence. A relation whose pronoun has candidates
+      that are more than one entity, or none, produces no fact and is
+      reported with reason Coreference; an ambiguous short name stands for
+      itself. First-person pronouns remain the speaker (SPEC-7.1-O2).
+    kind: property
+    risk: high
+    scope:
+      - src/extract/coref.rs::resolve
+      - src/extract/coref.rs::SIEVE_RULES
+      - src/extract/pipeline.rs::run
+      - src/extract/gline.rs::third_person_spans
 ```
 
 ## 7.2 Out of scope
 
-- Coreference beyond first-person pronouns ("she", "the company").
+- Coreference for definite descriptions ("the company", "my manager"),
+  gender agreement for "he"/"she" (two people in range stay ambiguous),
+  and cataphora ("Before he joined Acme, Bob ...").
 - Temporal negation ("used to work at") and recording when a relation ended.
   Cessation words ("left Acme", "former") only stop the stale fact from being
   asserted; the end time is a supersession, so it belongs to the bi-temporal
