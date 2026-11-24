@@ -353,13 +353,32 @@ pub struct AgentMemory<X: Extractor> {
     hyp_counter: u64,
 }
 
+/// Predicate of a coreference link candidate: `mention --coref--> antecedent`.
+pub const COREF_PRED: &str = "coref";
+/// Predicate tying an antecedent mention to its entity: `mention --mention_of--> entity`.
+pub const MENTION_OF_PRED: &str = "mention_of";
+
 pub const DEFAULT_RULES: &str = "\
+# coreference (SPEC-7.1-O8): a mention node refers to the entity its chain
+# of coref links reaches; facts stored under a mention node count for that
+# entity, and retracting a coref fact withdraws them
+refers(M,E) :- mention_entity(M,E).
+refers(M,E) :- coref(M,A,_,_), refers(A,E).
+# mention_node(M) is stored with each coref fact (and removed with the last
+# one), so the negations below read a base relation: demand-driven queries
+# (ask_deep) cannot negate a derived one
 # temporal projection: what is true NOW
-current(E,R,O) :- edge(E,R,O,VF,VT,_), now(T), VF =< T, T < VT.
+current(E,R,O) :- edge(E,R,O,VF,VT,_), now(T), VF =< T, T < VT, !mention_node(E), !mention_node(O).
+current(E,R,O) :- edge(M,R,O,VF,VT,_), refers(M,E), now(T), VF =< T, T < VT, !mention_node(O).
+current(S,R,E) :- edge(S,R,M,VF,VT,_), refers(M,E), now(T), VF =< T, T < VT, !mention_node(S).
+current(E,R,F) :- edge(M,R,N,VF,VT,_), refers(M,E), refers(N,F), now(T), VF =< T, T < VT.
 # point-in-time belief: what the store KNEW at time T (a fact counts
 # only once its asserted_at has passed, even if it was valid earlier —
 # query with T bound, e.g. via ask_deep)
-believed(E,R,O,T) :- edge(E,R,O,VF,VT,AT), AT =< T, VF =< T, T < VT.
+believed(E,R,O,T) :- edge(E,R,O,VF,VT,AT), AT =< T, VF =< T, T < VT, !mention_node(E), !mention_node(O).
+believed(E,R,O,T) :- edge(M,R,O,VF,VT,AT), refers(M,E), AT =< T, VF =< T, T < VT, !mention_node(O).
+believed(S,R,E,T) :- edge(S,R,M,VF,VT,AT), refers(M,E), AT =< T, VF =< T, T < VT, !mention_node(S).
+believed(E,R,F,T) :- edge(M,R,N,VF,VT,AT), refers(M,E), refers(N,F), AT =< T, VF =< T, T < VT.
 # curated exclusivity table for the update policy
 exclusive(\"works_at\").
 ";
@@ -421,9 +440,7 @@ impl<X: Extractor> AgentMemory<X> {
         };
         let candidates = self.extractor.extract(&episode);
         let mut report = IngestReport::default();
-        for c in &candidates {
-            self.apply_update(c, &episode, &mut report);
-        }
+        self.apply_all(&candidates, &episode, &mut report);
         self.episodes.push(episode);
         self.escalations.extend(report.escalations.clone());
         report
@@ -444,9 +461,7 @@ impl<X: Extractor> AgentMemory<X> {
         };
         let candidates = self.extractor.extract(&episode);
         let mut report = IngestReport::default();
-        for c in &candidates {
-            self.apply_update(c, &episode, &mut report);
-        }
+        self.apply_all(&candidates, &episode, &mut report);
         self.episodes.push(episode);
         self.escalations.extend(report.escalations.clone());
         report
@@ -458,6 +473,99 @@ impl<X: Extractor> AgentMemory<X> {
     /// - open fact with different O:
     ///     - P exclusive                   -> UPDATE (close old, assert new)
     ///     - otherwise                     -> ADD + escalation
+    /// Apply an episode's candidates: coreference links first (`coref`,
+    /// `mention_of`), so supersession by the episode's other facts already
+    /// sees through them.
+    fn apply_all(&mut self, candidates: &[CandidateFact], ep: &Episode, report: &mut IngestReport) {
+        let is_link = |c: &&CandidateFact| c.pred == COREF_PRED || c.pred == MENTION_OF_PRED;
+        for c in candidates.iter().filter(is_link) {
+            self.apply_link(c, ep);
+        }
+        for c in candidates.iter().filter(|c| !is_link(c)) {
+            self.apply_update(c, ep, report);
+        }
+    }
+
+    /// Store a coreference link as an EDB fact (SPEC-7.1-O8):
+    /// `coref(Mention, Antecedent, ConfPerMille, Episode)` or
+    /// `mention_entity(Mention, Entity)`, with the link's confidence as the
+    /// fact's annotation, so it flows into what `refers` derives.
+    fn apply_link(&mut self, c: &CandidateFact, ep: &Episode) {
+        let (s, o) = (self.engine.sym(&c.subj), self.engine.sym(&c.obj));
+        let ann = Ann::base(c.confidence, [ep.id.clone()]);
+        if c.pred == COREF_PRED {
+            let e = self.engine.sym(&ep.id);
+            let milli = Value::Int((c.confidence.clamp(0.0, 1.0) * 1000.0).round() as i64);
+            self.engine.declare("coref", &[s, o, milli, e], ann);
+            self.engine.declare("mention_node", &[s], Ann::base(1.0, [ep.id.clone()]));
+        } else {
+            self.engine.declare("mention_entity", &[s, o], ann);
+        }
+    }
+
+    /// The entity a mention node refers to, following `coref` links to a
+    /// `mention_entity` fact (the stored links, before `run()` derives
+    /// `refers`); `None` for a plain entity name.
+    fn mention_entity_of(&self, v: Value) -> Option<Value> {
+        let mut cur = v;
+        for _ in 0..64 {
+            if let Some((k, _)) = self.engine.query("mention_entity", &[Some(cur), None]).into_iter().next() {
+                return Some(k[1]);
+            }
+            cur = self.engine.query("coref", &[Some(cur), None, None, None]).into_iter().next()?.0[1];
+        }
+        None
+    }
+
+    /// Everything that names the same entity as `v` through stored coref
+    /// links: the entity and every mention node that refers to it.
+    fn identity_class(&self, v: Value) -> Vec<Value> {
+        let entity = self.mention_entity_of(v).unwrap_or(v);
+        let mut class = vec![entity];
+        if v != entity {
+            class.push(v);
+        }
+        let nodes: Vec<Value> = self.engine.relation_keys("coref").into_iter().map(|k| k[0]).collect();
+        for m in nodes {
+            if !class.contains(&m) && self.mention_entity_of(m) == Some(entity) {
+                class.push(m);
+            }
+        }
+        class
+    }
+
+    /// Withdraw the coreference links of `mention` (a mention node id):
+    /// its `coref` facts go, so `refers` no longer reaches an entity and
+    /// what was derived through it disappears at the next `maintain()`;
+    /// edges closed because of that identity are reopened. Returns how many
+    /// links were retracted.
+    pub fn retract_coref(&mut self, mention: &str) -> usize {
+        let m = self.engine.sym(mention);
+        let links: Vec<Vec<Value>> =
+            self.engine.query("coref", &[Some(m), None, None, None]).into_iter().map(|(k, _)| k).collect();
+        for k in &links {
+            self.engine.retract("coref", k);
+        }
+        self.engine.retract("mention_node", &[m]);
+        if !links.is_empty() {
+            let tag = format!("superseded_via:{mention}");
+            let closed: Vec<(Vec<Value>, Ann)> = self
+                .engine
+                .query("edge", &[None, None, None, None, None, None])
+                .into_iter()
+                .filter(|(_, a)| a.prov.contains(&tag))
+                .collect();
+            for (k, a) in closed {
+                let mut open = k.clone();
+                open[4] = Value::Int(i64::MAX);
+                self.engine.retract("edge", &k);
+                let prov: Vec<String> = a.prov.into_iter().filter(|p| p != &tag && p != "superseded").collect();
+                self.engine.declare("edge", &open, Ann::base(a.conf, prov));
+            }
+        }
+        links.len()
+    }
+
     fn apply_update(&mut self, c: &CandidateFact, ep: &Episode, report: &mut IngestReport) {
         let subj = self.engine.sym(&c.subj);
         let pred = self.engine.sym(&c.pred);
@@ -470,10 +578,12 @@ impl<X: Extractor> AgentMemory<X> {
             Ok(n) => Value::Int(n),
             Err(_) => self.engine.sym(&c.obj),
         };
-        let open: Vec<Vec<Value>> = self
-            .engine
-            .query("edge", &[Some(subj), Some(pred), None, None, None, None])
-            .into_iter()
+        // open edges for this subject and predicate, through coref identity:
+        // "He now works at Initech" supersedes Bob's open works_at
+        let class = self.identity_class(subj);
+        let open: Vec<Vec<Value>> = class
+            .iter()
+            .flat_map(|s| self.engine.query("edge", &[Some(*s), Some(pred), None, None, None, None]))
             .map(|(k, _)| k)
             .filter(|k| matches!(k[4].as_int(), Some(vt) if vt == i64::MAX))
             .collect();
@@ -532,8 +642,17 @@ impl<X: Extractor> AgentMemory<X> {
                 let mut closed = old.clone();
                 closed[4] = Value::Int(self.engine.now);
                 self.engine.retract("edge", old);
-                self.engine
-                    .declare("edge", &closed, Ann::base(0.9, ["superseded"]));
+                // closed across a coref link: remember which mention, so
+                // retracting that link reopens the edge
+                let mut prov = vec!["superseded".to_string()];
+                if old[0] != subj {
+                    for v in [subj, old[0]] {
+                        if self.mention_entity_of(v).is_some() {
+                            prov.push(format!("superseded_via:{}", self.engine.interner.display(&v)));
+                        }
+                    }
+                }
+                self.engine.declare("edge", &closed, Ann::base(0.9, prov));
             }
             self.assert_open(&[subj, pred, obj], c.confidence, &ep.id);
             report.updated += 1;
@@ -616,9 +735,7 @@ impl<X: Extractor> AgentMemory<X> {
             speaker: None,
         };
         let mut report = IngestReport::default();
-        for c in &candidates {
-            self.apply_update(c, &episode, &mut report);
-        }
+        self.apply_all(&candidates, &episode, &mut report);
         self.episodes.push(episode);
         self.escalations.extend(report.escalations.clone());
         (report, dropped)
@@ -644,9 +761,7 @@ impl<X: Extractor> AgentMemory<X> {
         }
         let episode = Episode { id, text: text.to_string(), ts, speaker };
         let mut report = IngestReport::default();
-        for c in &candidates {
-            self.apply_update(c, &episode, &mut report);
-        }
+        self.apply_all(&candidates, &episode, &mut report);
         self.episodes.push(episode);
         self.escalations.extend(report.escalations.clone());
         TextIngest { report, dropped, prose_lines: prose.len(), prose_facts: candidates.len() - protocol_facts }

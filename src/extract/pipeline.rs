@@ -398,6 +398,16 @@ pub struct GlinerExtractor<B: RelationBackend, L: EntityLinker> {
     relations: HashMap<String, (String, bool)>,
     /// Relations scoring below this are dropped.
     pub min_score: f32,
+    /// Second coreference tier (SPEC-7.1-O9): scores the pronouns the
+    /// sieves abstain on; a resolution needs [`GlinerExtractor::coref_gate`].
+    pub pair_scorer: Option<Box<dyn super::coref::PairScorer>>,
+    pub coref_gate: super::coref::Gate,
+    /// Emit each coref-resolved mention as a mention node with its own
+    /// facts, plus `coref` and `mention_of` facts that tie it to its
+    /// antecedent, instead of resolving it to the antecedent's id here
+    /// (SPEC-7.1-O8): memory then derives identity by a rule, and a link
+    /// can be retracted. Off by default.
+    pub coref_facts: bool,
     /// episode id -> (fingerprint of text + speaker, facts)
     seen: HashMap<String, (u64, Vec<CandidateFact>)>,
     seen_order: std::collections::VecDeque<String>,
@@ -427,6 +437,9 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
                 .map(|(l, p, _, _, inv)| (l.to_string(), (p.to_string(), *inv)))
                 .collect(),
             min_score: 0.5,
+            pair_scorer: None,
+            coref_gate: super::coref::Gate::default(),
+            coref_facts: false,
             seen: HashMap::new(),
             seen_order: Default::default(),
             memo_capacity: Self::DEFAULT_MEMO_CAPACITY,
@@ -451,6 +464,19 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
 
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    /// Use `scorer` as the second coreference tier, trusted through `gate`.
+    pub fn with_pair_scorer(mut self, scorer: Box<dyn super::coref::PairScorer>, gate: super::coref::Gate) -> Self {
+        self.pair_scorer = Some(scorer);
+        self.coref_gate = gate;
+        self
+    }
+
+    /// Emit coref links as facts (see [`GlinerExtractor::coref_facts`]).
+    pub fn with_coref_facts(mut self, on: bool) -> Self {
+        self.coref_facts = on;
+        self
     }
 
     /// Keep only the newest `log_capacity` rejections and errors. Trims in
@@ -481,7 +507,7 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
     /// sentence's mentions plus its relations' subjects and objects, with
     /// valid spans.
     fn coreference(
-        &self,
+        &mut self,
         sentences: &[String],
         analyses: &[Option<SentenceAnalysis>],
     ) -> HashMap<super::coref::Place, super::coref::Outcome> {
@@ -497,7 +523,8 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
             }
         }
         ms.sort_by_key(|(s, m)| (*s, m.start, m.end));
-        super::coref::resolve(&ms)
+        let gate = self.coref_gate;
+        super::coref::resolve_tiered(sentences, &ms, self.pair_scorer.as_deref_mut(), gate)
     }
 
     /// Is this mention a first-person pronoun ("I", "me", "my", "myself")?
@@ -566,6 +593,8 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
         let coref = self.coreference(&sentences, &analyses);
         // antecedents linked once each, in their own sentence
         let mut antecedent_links: HashMap<super::coref::Place, Link> = HashMap::new();
+        // coref-resolved mentions, for coref_facts: place -> node
+        let mut nodes: HashMap<super::coref::Place, MentionNode> = HashMap::new();
         for (si, (sentence, a)) in sentences.iter().zip(analyses).enumerate() {
             let Some(a) = a else { continue };
             for (subject, relation, object) in &a.unresolved {
@@ -637,7 +666,7 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
                 }
                 match coref.get(&(si, m.start, m.end)) {
                     // linked as the name it refers to, in that name's sentence
-                    Some(super::coref::Outcome::Resolved { sentence: rs, antecedent, .. }) => {
+                    Some(super::coref::Outcome::Resolved { sentence: rs, antecedent, conf, .. }) => {
                         let place = (*rs, antecedent.start, antecedent.end);
                         let l = match antecedent_links.get(&place) {
                             Some(l) => l.clone(),
@@ -648,6 +677,18 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
                                 l
                             }
                         };
+                        if let Link::Canonical { id, score } = &l {
+                            nodes.insert(
+                                (si, m.start, m.end),
+                                MentionNode {
+                                    id: mention_id(&ep.id, si, m.start, m.end),
+                                    antecedent: mention_id(&ep.id, *rs, antecedent.start, antecedent.end),
+                                    conf: *conf,
+                                    entity: id.clone(),
+                                    entity_score: *score,
+                                },
+                            );
+                        }
                         links[i] = l;
                     }
                     // a pronoun the sieves could not resolve stays unlinked
@@ -741,7 +782,30 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
                 let (_, _, _, r) = found.remove(k).unwrap();
                 self.reject(ep, &r, RejectReason::Reversed);
             }
-            for ((subj, pred, obj), (_, _, conf, _)) in found {
+            for ((subj, pred, obj), (_, _, conf, r)) in found {
+                let (subj, obj) = if self.coref_facts {
+                    // a coref-resolved side becomes its mention node, tied to
+                    // the antecedent by `coref`, the antecedent to its entity
+                    // by `mention_of`; memory derives the identity
+                    let (sm, om) = if self.relations.get(&r.label).is_some_and(|(_, inv)| *inv) {
+                        (&r.object, &r.subject)
+                    } else {
+                        (&r.subject, &r.object)
+                    };
+                    let mut side = |m: &Mention, id: String| match nodes.get(&(si, m.start, m.end)) {
+                        Some(n) => {
+                            let c = facts.entry((n.id.clone(), "coref".into(), n.antecedent.clone())).or_insert(0.0);
+                            *c = c.max(n.conf);
+                            let e = facts.entry((n.antecedent.clone(), "mention_of".into(), n.entity.clone())).or_insert(0.0);
+                            *e = e.max(n.entity_score as f64);
+                            n.id.clone()
+                        }
+                        None => id,
+                    };
+                    (side(sm, subj), side(om, obj))
+                } else {
+                    (subj, obj)
+                };
                 let e = facts.entry((subj, pred, obj)).or_insert(0.0);
                 if conf > *e {
                     *e = conf;
@@ -790,6 +854,35 @@ impl<B: RelationBackend, L: EntityLinker> Extractor for GlinerExtractor<B, L> {
     fn stats(&self) -> (usize, usize) {
         (self.calls, self.failures)
     }
+}
+
+/// A coref-resolved mention, for [`GlinerExtractor::coref_facts`].
+#[derive(Debug, Clone)]
+struct MentionNode {
+    /// This mention's node id.
+    id: String,
+    /// Its antecedent's node id.
+    antecedent: String,
+    /// Confidence of the link (1 for a sieve, the gated score for tier 2).
+    conf: f64,
+    /// The antecedent's canonical id, and its link score.
+    entity: String,
+    entity_score: f32,
+}
+
+/// The node id of a mention: `m:<episode>:<sentence>:<start>-<end>`, with an
+/// episode id that is long or has spaces replaced by its hash, so ids stay
+/// short single tokens.
+pub fn mention_id(episode: &str, sentence: usize, start: usize, end: usize) -> String {
+    let ep = if episode.len() <= 24 && !episode.chars().any(|c| c.is_whitespace() || c == ':') {
+        episode.to_string()
+    } else {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        episode.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
+    format!("m:{ep}:{sentence}:{start}-{end}")
 }
 
 /// What an episode's facts depend on besides its id: its text and speaker.

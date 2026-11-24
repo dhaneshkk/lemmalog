@@ -225,7 +225,8 @@ pub fn build_gliner(cfg: &GlinerConfig) -> Result<Box<dyn Extractor>, String> {
         #[cfg(not(feature = "glinker"))]
         Some(_) => return Err("LEMMALOG_GLINKER_PIPELINE is set but lemmalog was built without the `glinker` feature".into()),
     };
-    Ok(Box::new(GlinerExtractor::new(backend, linker)))
+    // memory derives coreference identity from link facts (SPEC-7.1-O8)
+    Ok(Box::new(GlinerExtractor::new(backend, linker).with_coref_facts(true)))
 }
 
 #[cfg(not(feature = "gliner"))]

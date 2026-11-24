@@ -161,6 +161,13 @@ aggregates need):
   resolve to the one earlier name they can mean, and yield nothing when
   two could fit). Pass `speaker` so "I" resolves. Anything outside that
   vocabulary, or that must be exact, write as protocol lines.
+- A fact extracted through a pronoun is stored on a mention node
+  (`m:<episode>:<sentence>:<start>-<end>`) linked by
+  `coref(Mention, Antecedent, ConfPerMille, Episode)`; `current` and
+  `believed` follow the link, so query those, not `edge`, to see it under
+  the entity. A wrong link is fixed by retracting it, which withdraws what
+  it derived. Links can also be stated as protocol lines:
+  `m:x:1:0-3 --coref[0.8]--> m:x:0:0-3` and `m:x:0:0-3 --mention_of--> Dana`.
 - **An asserted fact is `current(S, rel, O)`, not `rel(S, O)`.** Rule bodies
   match the triple: `reaches(X, Y) :- current(X, depends_on, Y).` Writing
   `depends_on(X, Y)` instead installs cleanly, reports a backfill count, and
