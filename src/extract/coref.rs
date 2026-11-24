@@ -127,7 +127,7 @@ pub enum Outcome {
     /// It refers to `antecedent` (a name, the root of its cluster) in
     /// sentence `sentence`; `sieve` says which sieve decided, `why` is the
     /// engine's proof.
-    Resolved { sentence: usize, antecedent: Mention, sieve: String, why: String },
+    Resolved { sentence: usize, antecedent: Mention, sieve: String, conf: f64, why: String },
     /// Its sieve's candidates are more than one entity (their names).
     Ambiguous(Vec<String>),
     /// A pronoun with no compatible earlier mention in range.
@@ -166,7 +166,15 @@ fn initials(text: &str) -> Option<String> {
 /// name a sieve resolved or found ambiguous; names absent from the map
 /// stand for themselves.
 pub fn resolve(mentions: &[(usize, Mention)]) -> HashMap<Place, Outcome> {
+    sieve(mentions).0
+}
+
+/// The sieves, plus for each pronoun they abstained on the candidates a
+/// second tier should weigh: the ambiguous pronoun's in-scope candidates,
+/// or, with none in range, every earlier name (nearest first).
+fn sieve(mentions: &[(usize, Mention)]) -> (HashMap<Place, Outcome>, HashMap<Place, Vec<(usize, Mention)>>) {
     let mut out = HashMap::new();
+    let mut abstained: HashMap<Place, Vec<(usize, Mention)>> = HashMap::new();
     // one entry per distinct place, first label wins
     let mut seen: HashMap<Place, usize> = HashMap::new();
     let mut ms: Vec<(usize, Mention)> = Vec::new();
@@ -223,11 +231,11 @@ pub fn resolve(mentions: &[(usize, Mention)]) -> HashMap<Place, Outcome> {
     };
     let part: Vec<usize> = (0..ms.len()).filter(|&i| takes_part(i)).collect();
     if part.is_empty() {
-        return out;
+        return (out, abstained);
     }
     let mut e: Engine<Ann> = Engine::new();
     if e.install_program(SIEVE_RULES).is_err() {
-        return out; // the program is a constant; tested below
+        return (out, abstained); // the program is a constant; tested below
     }
     for &id in &part {
         let (s, m) = &ms[id];
@@ -270,7 +278,7 @@ pub fn resolve(mentions: &[(usize, Mention)]) -> HashMap<Place, Outcome> {
         let sieve = e.interner.display(&k[2]).trim_matches('"').to_string();
         let why = e.why("coref", &k);
         let (rs, rm) = &ms[r];
-        out.insert(place(m), Outcome::Resolved { sentence: *rs, antecedent: rm.clone(), sieve, why });
+        out.insert(place(m), Outcome::Resolved { sentence: *rs, antecedent: rm.clone(), sieve, conf: 1.0, why });
     }
     let mut ambiguous: HashMap<usize, Vec<String>> = HashMap::new();
     for pred in ["pron_ambiguous", "name_ambiguous"] {
@@ -288,6 +296,114 @@ pub fn resolve(mentions: &[(usize, Mention)]) -> HashMap<Place, Outcome> {
     for k in e.relation_keys("pron_unresolved") {
         if let Some(m) = int(&k[0]) {
             out.entry(place(m)).or_insert(Outcome::NoAntecedent);
+        }
+    }
+    // candidates for the second tier
+    let mut ambiguous_in: HashMap<usize, Vec<usize>> = HashMap::new();
+    for k in e.relation_keys("pron_in") {
+        if let (Some(x), Some(a)) = (int(&k[0]), int(&k[1])) {
+            ambiguous_in.entry(x).or_default().push(a);
+        }
+    }
+    let pos = |i: usize| (ms[i].0, ms[i].1.start);
+    for (id, (_, m)) in ms.iter().enumerate() {
+        if pronoun_class(&m.text).is_none() {
+            continue;
+        }
+        let mut cands: Vec<usize> = match out.get(&place(id)) {
+            Some(Outcome::Ambiguous(_)) => ambiguous_in.get(&id).cloned().unwrap_or_default(),
+            Some(Outcome::NoAntecedent) => (0..ms.len())
+                .filter(|&a| pos(a) < pos(id) && pronoun_class(&ms[a].1.text).is_none() && !first_person(&ms[a].1.text))
+                .collect(),
+            _ => continue,
+        };
+        cands.sort_by_key(|&a| std::cmp::Reverse(pos(a)));
+        cands.dedup();
+        cands.truncate(MAX_TIER2_CANDIDATES);
+        if !cands.is_empty() {
+            abstained.insert(place(id), cands.into_iter().map(|a| ms[a].clone()).collect());
+        }
+    }
+    (out, abstained)
+}
+
+/// At most this many candidates (nearest first) go to the second tier for
+/// one pronoun.
+pub const MAX_TIER2_CANDIDATES: usize = 10;
+
+/// A second coreference tier: a model that scores how likely an anaphor
+/// refers to each candidate mention (F-coref, for example). It only ever
+/// sees pronouns the sieves abstained on.
+pub trait PairScorer {
+    /// Recorded as the resolution's `sieve` (for example "fcoref").
+    fn name(&self) -> &str;
+    /// One score in [0, 1] per candidate, in order.
+    fn score(
+        &mut self,
+        sentences: &[String],
+        anaphor: &(usize, Mention),
+        candidates: &[(usize, Mention)],
+    ) -> Result<Vec<f32>, String>;
+}
+
+/// When a second-tier score is trusted: the best candidate must reach
+/// `min_score` and beat the runner-up by `min_margin`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gate {
+    pub min_score: f32,
+    pub min_margin: f32,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Gate { min_score: 0.8, min_margin: 0.2 }
+    }
+}
+
+/// The best candidate the gate lets through, as (index, score).
+pub fn gated(scores: &[f32], gate: Gate) -> Option<(usize, f32)> {
+    let mut idx: Vec<usize> = (0..scores.len()).filter(|&i| scores[i].is_finite()).collect();
+    idx.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+    let best = *idx.first()?;
+    let runner_up = idx.get(1).map_or(0.0, |&i| scores[i]);
+    (scores[best] >= gate.min_score && scores[best] - runner_up >= gate.min_margin).then_some((best, scores[best]))
+}
+
+/// Tier 1, then tier 2: the sieves resolve what they can; each pronoun they
+/// abstain on is scored by `scorer` against its candidates, and resolved
+/// when the [`Gate`] passes, with the score as confidence. A scorer error or
+/// a closed gate leaves the sieve's outcome (Ambiguous, NoAntecedent).
+pub fn resolve_tiered(
+    sentences: &[String],
+    mentions: &[(usize, Mention)],
+    scorer: Option<&mut (dyn PairScorer + 'static)>,
+    gate: Gate,
+) -> HashMap<Place, Outcome> {
+    let (mut out, abstained) = sieve(mentions);
+    let Some(scorer) = scorer else { return out };
+    let mut places: Vec<&Place> = abstained.keys().collect();
+    places.sort();
+    for place in places {
+        let cands = &abstained[place];
+        let Some(anaphor) = mentions.iter().find(|(s, m)| (*s, m.start, m.end) == *place) else { continue };
+        let Ok(scores) = scorer.score(sentences, anaphor, cands) else { continue };
+        if scores.len() != cands.len() {
+            continue;
+        }
+        if let Some((i, score)) = gated(&scores, gate) {
+            let (rs, rm) = &cands[i];
+            let why = format!(
+                "{}: '{}' -> '{}' scored {score:.3} (gate: >= {}, margin >= {}) after the sieves abstained",
+                scorer.name(),
+                anaphor.1.text,
+                rm.text,
+                gate.min_score,
+                gate.min_margin
+            );
+            out.insert(
+                *place,
+                Outcome::Resolved { sentence: *rs, antecedent: rm.clone(), sieve: scorer.name().to_string(), conf: score as f64, why },
+            );
         }
     }
     out
@@ -428,6 +544,64 @@ mod tests {
         let start = s[0].find("He").unwrap();
         assert_eq!(o.get(&(0, start, start + 2)), Some(&Outcome::NoAntecedent), "no cataphora");
         assert!(!o.contains_key(&(1, 0, 1)));
+    }
+
+    /// Scores by a fixed table: (anaphor text, candidate text) -> score.
+    struct Table(Vec<(&'static str, &'static str, f32)>, usize);
+
+    impl PairScorer for Table {
+        fn name(&self) -> &str {
+            "table"
+        }
+        fn score(&mut self, _s: &[String], a: &(usize, Mention), c: &[(usize, Mention)]) -> Result<Vec<f32>, String> {
+            self.1 += 1;
+            Ok(c.iter()
+                .map(|(_, m)| self.0.iter().find(|(x, y, _)| *x == a.1.text && *y == m.text).map_or(0.0, |t| t.2))
+                .collect())
+        }
+    }
+
+    fn tiered(sentences: &[&str], mentions: &[(usize, &str, &str)], scorer: &mut Table) -> HashMap<Place, Outcome> {
+        let ss: Vec<String> = sentences.iter().map(|s| s.to_string()).collect();
+        let ms: Vec<(usize, Mention)> = mentions.iter().map(|(s, t, l)| (*s, m(t, l, sentences[*s]))).collect();
+        resolve_tiered(&ss, &ms, Some(scorer), Gate::default())
+    }
+
+    #[test]
+    fn tier_two_only_sees_what_the_sieves_abstain_on() {
+        // "He" (1) is ambiguous: Bob or Dana; "She" (2) is clear: Priya
+        let s = ["Bob met Dana.", "He works at Acme.", "Priya joined. She leads search."];
+        let mut t = Table(vec![("He", "Bob", 0.93), ("He", "Dana", 0.41), ("She", "Priya", 0.2)], 0);
+        let o = tiered(&s, &[(0, "Bob", "person"), (0, "Dana", "person"), (1, "He", "person"), (2, "Priya", "person"), (2, "She", "person")], &mut t);
+        let he = s[1].find("He").unwrap();
+        assert!(matches!(o.get(&(1, he, he + 2)), Some(Outcome::Resolved { antecedent, sieve, conf, .. })
+            if antecedent.text == "Bob" && sieve == "table" && (*conf - 0.93).abs() < 1e-6));
+        // the sieve resolved "She": the scorer never saw it (its 0.2 is unused)
+        let she = s[2].find("She").unwrap();
+        assert!(matches!(o.get(&(2, she, she + 3)), Some(Outcome::Resolved { sieve, conf, .. }) if sieve == "pronoun" && *conf == 1.0));
+        assert_eq!(t.1, 1, "one call: the one abstention");
+    }
+
+    #[test]
+    fn the_gate_needs_score_and_margin() {
+        assert_eq!(gated(&[0.93, 0.41], Gate::default()), Some((0, 0.93)));
+        assert_eq!(gated(&[0.79, 0.1], Gate::default()), None, "below min_score");
+        assert_eq!(gated(&[0.9, 0.85], Gate::default()), None, "no margin");
+        assert_eq!(gated(&[0.2, 0.95], Gate::default()), Some((1, 0.95)));
+        assert_eq!(gated(&[f32::NAN, 0.9], Gate::default()), Some((1, 0.9)));
+        assert_eq!(gated(&[], Gate::default()), None);
+        let s = ["Bob met Dana.", "He works at Acme."];
+        let mut t = Table(vec![("He", "Bob", 0.9), ("He", "Dana", 0.85)], 0);
+        let o = tiered(&s, &[(0, "Bob", "person"), (0, "Dana", "person"), (1, "He", "person")], &mut t);
+        assert!(matches!(o.get(&(1, 0, 2)), Some(Outcome::Ambiguous(_))), "closed gate keeps the sieve's answer");
+    }
+
+    #[test]
+    fn tier_two_can_anchor_a_pronoun_beyond_the_window() {
+        let s = ["Bob runs Initech.", "a.", "b.", "c.", "He left."];
+        let mut t = Table(vec![("He", "Bob", 0.9)], 0);
+        let o = tiered(&s, &[(0, "Bob", "person"), (0, "Initech", "organization"), (4, "He", "person")], &mut t);
+        assert!(matches!(o.get(&(4, 0, 2)), Some(Outcome::Resolved { antecedent, .. }) if antecedent.text == "Bob"));
     }
 
     #[test]

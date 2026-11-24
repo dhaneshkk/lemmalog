@@ -46,6 +46,10 @@ name = "extraction_eval"
 required-features = ["gliner", "glinker"]
 
 [[example]]
+name = "coref_eval"
+required-features = ["gliner"]
+
+[[example]]
 name = "lmstudio"
 required-features = ["llm"]
 
@@ -72,7 +76,7 @@ default = ["openvino", "cuda"]
 # Model-based extraction without an LLM: gline-rs NER + relation extraction.
 # On its own it links an ONNX Runtime found at build time (ORT_LIB_LOCATION
 # or a system install); the two features below pick the usual modes.
-gliner = ["dep:gline-rs", "dep:orp", "dep:composable"]
+gliner = ["dep:gline-rs", "dep:orp", "dep:composable", "dep:serde_json"]
 # Load the ONNX Runtime shared library at run time (the default).
 gliner-load-dynamic = ["gliner", "gline-rs/load-dynamic", "orp/load-dynamic", "glinker-rs?/load-dynamic"]
 # Run GLiNER on Intel OpenVINO (CPU, GPU or NPU) when the loaded ONNX Runtime

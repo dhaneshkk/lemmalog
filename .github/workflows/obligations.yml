@@ -43,3 +43,4 @@ jobs:
           --test default_extraction_test
           --test robustness_test
           --test coref_test
+          --test coref_memory_test

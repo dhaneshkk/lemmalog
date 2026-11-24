@@ -158,7 +158,19 @@ names are resolved by coreference sieves written as Datalog rules and run
 on lemmalog's own engine (exact name, acronym, head word, then pronouns),
 so "Bob joined Acme. He works at Initech." gives `Bob works_at Initech`,
 and every link has a `why` proof. A pronoun with two candidates ("Bob met
-Dana. He …") or none yields no fact. An extracted fact's
+Dana. He …") or none yields no fact. In memory, a resolved mention is stored as
+its own node with a `coref(mention, antecedent, conf, episode)` fact, so
+the entity's identity is derived by rule and `retract_coref` withdraws a
+wrong link along with everything it derived (and reopens any edge it
+superseded). A second tier (any `PairScorer`, e.g. an INT8 F-coref) can
+be plugged in for the pronouns the sieves abstain on, accepted only past a
+score-and-margin gate. Whether you need one is a measurement:
+`cargo run --release --features gliner --example coref_eval -- score
+gold.jsonl` reports the sieves' abstention rate, per-tier accuracy and the
+mention-pair MCC, and `label` turns your conversations into a template to
+label (`notebooks/coref_eval.ipynb` does both in Colab;
+`benchmarks/coref_gold.example.jsonl` shows the format and measures
+nothing). An extracted fact's
 confidence is the lowest of its relation score and its two link scores;
 derived facts then combine confidences by product (the semiring above).
 

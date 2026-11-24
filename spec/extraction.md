@@ -203,7 +203,9 @@ obligations:
       the antecedent's sentence. A relation whose pronoun has candidates
       that are more than one entity, or none, produces no fact and is
       reported with reason Coreference; an ambiguous short name stands for
-      itself. First-person pronouns remain the speaker (SPEC-7.1-O2).
+      itself. First-person pronouns remain the speaker (SPEC-7.1-O2). With
+      coref facts on, a resolved mention is stored as a mention node
+      instead (SPEC-7.1-O8).
     kind: property
     risk: high
     scope:
@@ -211,6 +213,39 @@ obligations:
       - src/extract/coref.rs::SIEVE_RULES
       - src/extract/pipeline.rs::run
       - src/extract/gline.rs::third_person_spans
+  - id: SPEC-7.1-O8
+    says: >
+      With coref facts on (the memory path, extract::setup::build_gliner),
+      a fact whose subject or object was resolved by coreference is stored
+      under a mention node m:<episode>:<sentence>:<start>-<end> rather than
+      under the entity, together with a link fact coref(mention, antecedent,
+      confidence per mille, episode) and mention_entity(antecedent, entity).
+      Identity is derived by rule (refers, then current and believed), so a
+      query for the entity sees the mention's facts. Retracting a mention's
+      links (Agent::retract_coref) withdraws every fact derived through
+      them and reopens any exclusive edge they closed. An exclusive fact
+      supersedes across a link as it does for the entity itself.
+    kind: property
+    risk: high
+    scope:
+      - src/agent.rs::apply_link
+      - src/agent.rs::retract_coref
+      - src/agent.rs::DEFAULT_RULES
+      - src/extract/pipeline.rs::mention_id
+  - id: SPEC-7.1-O9
+    says: >
+      A second-tier pair scorer (extract::coref::PairScorer) runs only on
+      pronouns the sieves abstain on (Ambiguous or NoAntecedent) and never
+      changes a sieve link. Its answer is accepted only when the gate
+      passes: the best score is at least min_score and beats the runner-up
+      by at least min_margin (default 0.8 and 0.2); the accepted score is
+      the link's confidence. A closed gate or a scorer error leaves the
+      sieve's outcome. Without a scorer the result is the sieves' alone.
+    kind: property
+    risk: high
+    scope:
+      - src/extract/coref.rs::resolve_tiered
+      - src/extract/coref.rs::gated
 ```
 
 ## 7.2 Out of scope
