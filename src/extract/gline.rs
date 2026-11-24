@@ -283,6 +283,10 @@ pub struct GlineBackend {
     /// Add "I"/"me"/"myself" as `person` spans when NER missed them, so
     /// first-person relations reach the speaker. Default true.
     pub first_person: bool,
+    /// Add third-person pronouns ("he", "she", "it", "they", ...) as spans
+    /// when NER missed them, so their relations reach the coreference
+    /// sieves (SPEC-7.1-O7), which resolve them or report them. Default true.
+    pub third_person: bool,
     /// Use the relaxed schema ([`RELAXED_OBJECTS`]) for relation extraction.
     /// Off by default: it can let a real organization be a person's
     /// manager. Only [`GlineBackend::new`] builds a relaxed schema.
@@ -334,6 +338,7 @@ impl GlineBackend {
             labels,
             max_entities: 12,
             first_person: true,
+            third_person: true,
             relaxed_objects: false,
             truncated: 0,
             no_subject: 0,
@@ -354,6 +359,9 @@ impl GlineBackend {
         let mut spans: Vec<Span> = out.spans.into_iter().next().unwrap_or_default();
         if self.first_person && self.labels.iter().any(|l| l == "person") {
             spans.extend(first_person_spans(sentence, &spans));
+        }
+        if self.third_person {
+            spans.extend(third_person_spans(sentence, &spans, &self.labels));
         }
         spans.sort_by(|a, b| b.probability().total_cmp(&a.probability()));
         if spans.len() > self.max_entities {
@@ -394,6 +402,28 @@ pub fn first_person_spans(sentence: &str, existing: &[Span]) -> Vec<Span> {
         })
         .filter(|t| existing.iter().all(|s| s.offsets().1 <= t.start || s.offsets().0 >= t.end))
         .map(|t| Span::new(0, t.start, t.end, sentence[t.start..t.end].to_string(), "person".into(), 1.0))
+        .collect()
+}
+
+/// Third-person pronouns (as whole words, not already covered by a span),
+/// labelled with a class GLiNER relations accept: "he"/"she"/"they" as
+/// `person`, "it" as `organization`, when those labels are in use.
+/// Possessives ("his", "its", "their") are left out: they qualify a noun
+/// rather than name an entity.
+pub fn third_person_spans(sentence: &str, existing: &[Span], labels: &[String]) -> Vec<Span> {
+    let has = |l: &str| labels.iter().any(|x| x == l);
+    super::negex::tokenize(sentence)
+        .into_iter()
+        .filter_map(|t| {
+            let label = match t.lower.as_str() {
+                "he" | "him" | "she" | "her" | "they" | "them" if has("person") => "person",
+                "it" if has("organization") => "organization",
+                _ => return None,
+            };
+            Some((t, label))
+        })
+        .filter(|(t, _)| existing.iter().all(|s| s.offsets().1 <= t.start || s.offsets().0 >= t.end))
+        .map(|(t, label)| Span::new(0, t.start, t.end, sentence[t.start..t.end].to_string(), label.into(), 1.0))
         .collect()
 }
 
@@ -543,6 +573,18 @@ mod tests {
             assert_eq!(r.allows_object("organization") && !s.allows_object("organization"), widened, "{label}");
             assert!(r.allows_object("person") || !s.allows_object("person"), "{label}: relaxed keeps strict objects");
         }
+    }
+
+    #[test]
+    fn third_person_spans_take_the_labels_in_use() {
+        let s = "He said it hired her, and they agreed with his plan.";
+        let labels: Vec<String> = ["person", "organization"].iter().map(|x| x.to_string()).collect();
+        let got: Vec<(String, String)> =
+            third_person_spans(s, &[], &labels).iter().map(|x| (x.text().to_string(), x.class().to_string())).collect();
+        let want = [("He", "person"), ("it", "organization"), ("her", "person"), ("they", "person")];
+        assert_eq!(got, want.map(|(a, b)| (a.to_string(), b.to_string())));
+        // no "organization" label: "it" is not proposed
+        assert_eq!(third_person_spans("It hired Bob.", &[], &["person".to_string()]).len(), 0);
     }
 
     #[test]

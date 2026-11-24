@@ -153,7 +153,12 @@ huggingface-cli download onnx-community/gliner-multitask-large-v0.5 \
 ```
 
 Negated sentences ("Bob no longer works at Acme") and hedged ones ("Bob
-might join Acme", "if Bob joins Acme") assert nothing. An extracted fact's
+might join Acme", "if Bob joins Acme") assert nothing. Pronouns and short
+names are resolved by coreference sieves written as Datalog rules and run
+on lemmalog's own engine (exact name, acronym, head word, then pronouns),
+so "Bob joined Acme. He works at Initech." gives `Bob works_at Initech`,
+and every link has a `why` proof. A pronoun with two candidates ("Bob met
+Dana. He …") or none yields no fact. An extracted fact's
 confidence is the lowest of its relation score and its two link scores;
 derived facts then combine confidences by product (the semiring above).
 

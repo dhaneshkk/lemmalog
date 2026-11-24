@@ -42,3 +42,4 @@ jobs:
           --test extraction_followup_test
           --test default_extraction_test
           --test robustness_test
+          --test coref_test

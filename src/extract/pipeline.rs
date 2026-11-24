@@ -222,6 +222,9 @@ pub enum RejectReason {
     /// The relation is only possible, planned or conditional ("Bob might
     /// join Acme", "If Bob joins Acme"), not asserted (see SPEC-7.1-O6).
     Hedged,
+    /// A pronoun the coreference sieves could not resolve: more than one
+    /// candidate entity, or none in range (see SPEC-7.1-O7).
+    Coreference(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -474,6 +477,29 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
         });
     }
 
+    /// Run the coreference sieves over the episode's mentions: each
+    /// sentence's mentions plus its relations' subjects and objects, with
+    /// valid spans.
+    fn coreference(
+        &self,
+        sentences: &[String],
+        analyses: &[Option<SentenceAnalysis>],
+    ) -> HashMap<super::coref::Place, super::coref::Outcome> {
+        let mut ms: Vec<(usize, Mention)> = Vec::new();
+        for (si, a) in analyses.iter().enumerate() {
+            let Some(a) = a else { continue };
+            let sentence = &sentences[si];
+            let ok = |m: &Mention| m.start < m.end && sentence.get(m.start..m.end).is_some();
+            for m in a.mentions.iter().chain(a.relations.iter().flat_map(|r| [&r.subject, &r.object])) {
+                if ok(m) {
+                    ms.push((si, Mention { text: sentence[m.start..m.end].to_string(), ..m.clone() }));
+                }
+            }
+        }
+        ms.sort_by_key(|(s, m)| (*s, m.start, m.end));
+        super::coref::resolve(&ms)
+    }
+
     /// Is this mention a first-person pronoun ("I", "me", "my", "myself")?
     fn first_person(m: &Mention) -> bool {
         matches!(m.text.to_lowercase().as_str(), "i" | "me" | "my" | "myself")
@@ -535,7 +561,12 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
         // (subj, pred, obj) -> best confidence; BTreeMap keeps output order stable
         let mut facts: BTreeMap<(String, String, String), f64> = BTreeMap::new();
         let mut speaker: Option<Link> = None;
-        for (sentence, a) in sentences.iter().zip(analyses) {
+        // coreference over the whole episode (SPEC-7.1-O7): every mention
+        // a sieve resolves, or a pronoun it could not
+        let coref = self.coreference(&sentences, &analyses);
+        // antecedents linked once each, in their own sentence
+        let mut antecedent_links: HashMap<super::coref::Place, Link> = HashMap::new();
+        for (si, (sentence, a)) in sentences.iter().zip(analyses).enumerate() {
             let Some(a) = a else { continue };
             for (subject, relation, object) in &a.unresolved {
                 self.rejected.push(Rejection {
@@ -602,8 +633,27 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
             for (i, m) in all.iter().enumerate() {
                 if Self::first_person(m) {
                     links[i] = self.speaker_link(ep, &mut speaker);
-                } else {
-                    ask.push((i, strip_title(sentence, m)));
+                    continue;
+                }
+                match coref.get(&(si, m.start, m.end)) {
+                    // linked as the name it refers to, in that name's sentence
+                    Some(super::coref::Outcome::Resolved { sentence: rs, antecedent, .. }) => {
+                        let place = (*rs, antecedent.start, antecedent.end);
+                        let l = match antecedent_links.get(&place) {
+                            Some(l) => l.clone(),
+                            None => {
+                                let rsent = &sentences[*rs];
+                                let l = self.linker.link(rsent, &[strip_title(rsent, antecedent)]).into_iter().next().unwrap_or(Link::Unlinked);
+                                antecedent_links.insert(place, l.clone());
+                                l
+                            }
+                        };
+                        links[i] = l;
+                    }
+                    // a pronoun the sieves could not resolve stays unlinked
+                    // (reported below); an ambiguous name stands for itself
+                    Some(_) if super::coref::pronoun_class(&m.text).is_some() => {}
+                    _ => ask.push((i, strip_title(sentence, m))),
                 }
             }
             if !ask.is_empty() {
@@ -616,6 +666,17 @@ impl<B: RelationBackend, L: EntityLinker> GlinerExtractor<B, L> {
             // confidence, relation)
             let mut found: BTreeMap<(String, String, String), (bool, f32, f64, RawRelation)> = BTreeMap::new();
             for (i, (r, pred, inverse)) in kept.iter().enumerate() {
+                let unresolved = [&r.subject, &r.object].into_iter().find_map(|m| match coref.get(&(si, m.start, m.end)) {
+                    Some(super::coref::Outcome::Ambiguous(names)) if super::coref::pronoun_class(&m.text).is_some() => {
+                        Some(format!("'{}' could refer to {}", m.text, names.join(" or ")))
+                    }
+                    Some(super::coref::Outcome::NoAntecedent) => Some(format!("'{}' has no earlier mention to refer to", m.text)),
+                    _ => None,
+                });
+                if let Some(why) = unresolved {
+                    self.reject(ep, r, RejectReason::Coreference(why));
+                    continue;
+                }
                 let (s, o) = (links.get(2 * i), links.get(2 * i + 1));
                 let (Some(Link::Canonical { id: sid, score: ss }), Some(Link::Canonical { id: oid, score: os })) = (s, o) else {
                     let which = match s {
@@ -748,6 +809,9 @@ fn fingerprint(ep: &Episode) -> u64 {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureBackend {
     rules: Vec<(String, String, String, String, String, f32)>,
+    /// Standalone mentions: (text, label), reported at every whole-word
+    /// occurrence, so a sentence can name an entity without a relation.
+    mentions: Vec<(String, String)>,
     /// How many times `analyse` ran.
     pub calls: usize,
 }
@@ -763,6 +827,24 @@ impl FixtureBackend {
         self.rules.push((subj.into(), sl.into(), label.into(), obj.into(), ol.into(), score));
         self
     }
+
+    /// Report `text` as a `label` mention wherever it occurs as a whole word
+    /// ("Bob met Dana." names Bob and Dana with no relation between them).
+    pub fn mention(mut self, text: &str, label: &str) -> Self {
+        self.mentions.push((text.into(), label.into()));
+        self
+    }
+}
+
+/// Byte offsets of `word` in `s` as a whole word (not inside another word).
+fn whole_word(s: &str, word: &str) -> Vec<usize> {
+    let wordy = |c: char| c.is_alphanumeric() || c == '_';
+    s.match_indices(word)
+        .map(|(i, _)| i)
+        .filter(|&i| {
+            !s[..i].chars().next_back().is_some_and(wordy) && !s[i + word.len()..].chars().next().is_some_and(wordy)
+        })
+        .collect()
 }
 
 impl RelationBackend for FixtureBackend {
@@ -772,6 +854,11 @@ impl RelationBackend for FixtureBackend {
             .iter()
             .map(|s| {
                 let mut a = SentenceAnalysis::default();
+                for (text, label) in &self.mentions {
+                    for i in whole_word(s, text) {
+                        a.mentions.push(Mention { text: text.clone(), label: label.clone(), start: i, end: i + text.len(), score: 0.9 });
+                    }
+                }
                 for (subj, sl, label, obj, ol, score) in &self.rules {
                     let Some(si) = s.find(subj.as_str()) else { continue };
                     let Some(oi) = s[si + subj.len()..].find(obj.as_str()).map(|i| i + si + subj.len()) else {

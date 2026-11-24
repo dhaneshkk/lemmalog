@@ -6,6 +6,7 @@
 pub mod eval;
 pub mod link;
 pub mod negex;
+pub mod coref;
 pub mod pipeline;
 pub mod setup;
 #[cfg(feature = "gliner")]
